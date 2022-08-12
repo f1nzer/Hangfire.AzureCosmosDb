@@ -14,6 +14,7 @@ using Hangfire.Logging;
 using Hangfire.Server;
 using Hangfire.Storage;
 using Microsoft.Azure.Cosmos;
+using Microsoft.Azure.Cosmos.Fluent;
 using Microsoft.Azure.Cosmos.Scripts;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Serialization;
@@ -46,9 +47,13 @@ public sealed class CosmosDbStorage : JobStorage
     /// <param name="authSecret">The secret key for the Cosmos Database</param>
     /// <param name="databaseName">The name of the database to connect with</param>
     /// <param name="containerName">The name of the collection/container on the database</param>
-    /// <param name="options">The CosmosClientOptions object to override any of the options</param>
     /// <param name="storageOptions">The CosmosDbStorageOptions object to override any of the options</param>
-    internal CosmosDbStorage(string url, string authSecret, string databaseName, string containerName, CosmosClientOptions? options = null, CosmosDbStorageOptions? storageOptions = null)
+    internal CosmosDbStorage(
+        string url,
+        string authSecret,
+        string databaseName,
+        string containerName,
+        CosmosDbStorageOptions? storageOptions = null)
         : this(databaseName, containerName, storageOptions)
     {
         if (string.IsNullOrEmpty(url))
@@ -61,21 +66,25 @@ public sealed class CosmosDbStorage : JobStorage
             throw new ArgumentNullException(nameof(authSecret));
         }
 
-        options ??= new CosmosClientOptions();
-        ConfigureCosmosClientOptions(options);
-        Client = new CosmosClient(url, authSecret, options);
+        CosmosClientBuilder builder = new(url, authSecret);
+        ConfigureCosmosClientBuilder(builder);
+        Client = builder.Build();
     }
 
-    internal CosmosDbStorage(CosmosClient cosmosClient, string databaseName, string containerName, CosmosDbStorageOptions? storageOptions = null)
+    internal CosmosDbStorage(
+        CosmosClientBuilder cosmosClientBuilder,
+        string databaseName,
+        string containerName,
+        CosmosDbStorageOptions? storageOptions = null)
         : this(databaseName, containerName, storageOptions)
     {
-        if (cosmosClient is null)
+        if (cosmosClientBuilder == null)
         {
-            throw new ArgumentNullException(nameof(cosmosClient));
+            throw new ArgumentNullException(nameof(cosmosClientBuilder));
         }
-
-        ConfigureCosmosClientOptions(cosmosClient.ClientOptions);
-        Client = cosmosClient;
+        
+        ConfigureCosmosClientBuilder(cosmosClientBuilder);
+        Client = cosmosClientBuilder.Build();
     }
 
     private CosmosDbStorage(string databaseName, string containerName, CosmosDbStorageOptions? storageOptions = null)
@@ -106,13 +115,10 @@ public sealed class CosmosDbStorage : JobStorage
 
     internal Container Container { get; private set; } = null!;
 
-    private void ConfigureCosmosClientOptions(CosmosClientOptions cosmosClientOptions)
-    {
-        cosmosClientOptions.ApplicationName ??= "Hangfire";
-        cosmosClientOptions.Serializer = new CosmosJsonSerializer(settings);
-        cosmosClientOptions.MaxRetryAttemptsOnRateLimitedRequests ??= 9;
-        cosmosClientOptions.MaxRetryWaitTimeOnRateLimitedRequests ??= TimeSpan.FromSeconds(30);
-    }
+    private void ConfigureCosmosClientBuilder(CosmosClientBuilder builder) => builder
+        .WithApplicationName("Hangfire")
+        .WithCustomSerializer(new CosmosJsonSerializer(settings))
+        .WithThrottlingRetryOptions(TimeSpan.FromSeconds(30), 9);
 
     /// <summary>
     /// </summary>
@@ -174,11 +180,15 @@ public sealed class CosmosDbStorage : JobStorage
     /// <param name="authSecret">The secret key for the Cosmos Database</param>
     /// <param name="databaseName">The name of the database to connect with</param>
     /// <param name="containerName">The name of the collection/container on the database</param>
-    /// <param name="options">The CosmosClientOptions object to override any of the options</param>
     /// <param name="storageOptions">The CosmosDbStorageOptions object to override any of the options</param>
-    public static CosmosDbStorage Create(string url, string authSecret, string databaseName, string containerName, CosmosClientOptions? options = null, CosmosDbStorageOptions? storageOptions = null)
+    public static CosmosDbStorage Create(
+        string url,
+        string authSecret,
+        string databaseName,
+        string containerName,
+        CosmosDbStorageOptions? storageOptions = null)
     {
-        CosmosDbStorage storage = new (url, authSecret, databaseName, containerName, options, storageOptions);
+        CosmosDbStorage storage = new (url, authSecret, databaseName, containerName, storageOptions);
         storage.InitializeAsync().ExecuteSynchronously();
         return storage;
     }
@@ -187,13 +197,17 @@ public sealed class CosmosDbStorage : JobStorage
     /// <summary>
     ///     Creates and returns an instance of CosmosDbStorage
     /// </summary>
-    /// <param name="cosmosClient">An instance of CosmosClient</param>
+    /// <param name="cosmosClientBuilder">An instance of CosmosClientBuilder</param>
     /// <param name="databaseName">The name of the database to connect with</param>
     /// <param name="containerName">The name of the collection/container on the database</param>
     /// <param name="storageOptions">The CosmosDbStorageOptions object to override any of the options</param>
-    public static CosmosDbStorage Create(CosmosClient cosmosClient, string databaseName, string containerName, CosmosDbStorageOptions? storageOptions = null)
+    public static CosmosDbStorage Create(
+        CosmosClientBuilder cosmosClientBuilder,
+        string databaseName,
+        string containerName,
+        CosmosDbStorageOptions? storageOptions = null)
     {
-        CosmosDbStorage storage = new (cosmosClient, databaseName, containerName, storageOptions);
+        CosmosDbStorage storage = new (cosmosClientBuilder, databaseName, containerName, storageOptions);
         storage.InitializeAsync().ExecuteSynchronously();
         return storage;
     }
@@ -205,20 +219,17 @@ public sealed class CosmosDbStorage : JobStorage
     /// <param name="authSecret">The secret key for the Cosmos Database</param>
     /// <param name="databaseName">The name of the database to connect with</param>
     /// <param name="containerName">The name of the collection/container on the database</param>
-    /// <param name="options">The CosmosClientOptions object to override any of the options</param>
     /// <param name="storageOptions">The CosmosDbStorageOptions object to override any of the options</param>
     /// <param name="cancellationToken">A cancellation token</param>
-    public static async Task<CosmosDbStorage> CreateAsync(string url, string authSecret, string databaseName, string containerName,
-        CosmosClientOptions? options = null,
+    public static async Task<CosmosDbStorage> CreateAsync(
+        string url,
+        string authSecret,
+        string databaseName,
+        string containerName,
         CosmosDbStorageOptions? storageOptions = null,
         CancellationToken cancellationToken = default)
     {
-        if (options is { EnableContentResponseOnWrite: true })
-        {
-            throw new NotSupportedException($"{nameof(options.EnableContentResponseOnWrite)} is not supported. Please check the CosmosClientOptions object");
-        }
-
-        CosmosDbStorage storage = new (url, authSecret, databaseName, containerName, options, storageOptions);
+        CosmosDbStorage storage = new (url, authSecret, databaseName, containerName, storageOptions);
         await storage.InitializeAsync(cancellationToken);
         return storage;
     }
@@ -226,16 +237,19 @@ public sealed class CosmosDbStorage : JobStorage
     /// <summary>
     ///     Creates and returns an instance of CosmosDbStorage
     /// </summary>
-    /// <param name="cosmosClient">An instance of CosmosClient</param>
+    /// <param name="cosmosClientBuilder">An instance of CosmosClientBuilder</param>
     /// <param name="databaseName">The name of the database to connect with</param>
     /// <param name="containerName">The name of the collection/container on the database</param>
     /// <param name="storageOptions">The CosmosDbStorageOptions object to override any of the options</param>
     /// <param name="cancellationToken">A cancellation token</param>
-    public static async Task<CosmosDbStorage> CreateAsync(CosmosClient cosmosClient, string databaseName, string containerName,
+    public static async Task<CosmosDbStorage> CreateAsync(
+        CosmosClientBuilder cosmosClientBuilder,
+        string databaseName,
+        string containerName,
         CosmosDbStorageOptions? storageOptions = null,
         CancellationToken cancellationToken = default)
     {
-        CosmosDbStorage storage = new (cosmosClient, databaseName, containerName, storageOptions);
+        CosmosDbStorage storage = new (cosmosClientBuilder, databaseName, containerName, storageOptions);
         await storage.InitializeAsync(cancellationToken);
         return storage;
     }

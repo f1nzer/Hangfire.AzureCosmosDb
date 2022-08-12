@@ -1,7 +1,6 @@
 using Hangfire;
-using Microsoft.Azure.Cosmos;
-using Hangfire.Azure;
 using Hangfire.AzureCosmosDB.Sample;
+using Microsoft.Azure.Cosmos.Fluent;
 using LogLevel = Hangfire.Logging.LogLevel;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
@@ -19,23 +18,16 @@ builder.Services.AddHangfireServer(x =>
 	x.WorkerCount = 25;
 });
 
-CosmosClientOptions cosmoClientOptions = new()
-{
-	ApplicationName = "hangfire",
-	RequestTimeout = TimeSpan.FromSeconds(60),
-	ConnectionMode = ConnectionMode.Direct
-};
-
 // use cosmos emulator or free cosmos plan from azure
-string url = "https://localhost:8081";
-string secretKey = "C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHLM+4QDU5DE2nQ9nDuVTqobD4b8mGGyPMbIZnqyMsEcaGQy67XIw/Jw==";
-string database = "hangfire";
-string collection = "hangfire-test";
+const string url = "https://localhost:8081";
+const string secretKey = "C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHLM+4QDU5DE2nQ9nDuVTqobD4b8mGGyPMbIZnqyMsEcaGQy67XIw/Jw==";
+const string database = "hangfire";
+const string collection = "hangfire-test";
 
 builder.Services.AddHangfire(o =>
 {
-	o.UseAzureCosmosDbStorage(url, secretKey, database, collection, cosmoClientOptions);
-    // o.UseAzureCosmosDbStorage(new CosmosClient(url, secretKey, cosmoClientOptions), database, collection);
+	// o.UseAzureCosmosDbStorage(url, secretKey, database, collection);
+    o.UseAzureCosmosDbStorage(new CosmosClientBuilder(url, secretKey), database, collection);
 	o.UseColouredConsoleLogProvider(LogLevel.Trace);
 });
 
