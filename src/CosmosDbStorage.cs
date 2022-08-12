@@ -308,21 +308,19 @@ public sealed class CosmosDbStorage : JobStorage
         foreach (string storedProcedureFile in storedProcedureFiles)
         {
             logger.Info($"Creating storedprocedure : [{storedProcedureFile}]");
-            Stream? stream = assembly.GetManifestResourceStream(storedProcedureFile);
+            using Stream? stream = assembly.GetManifestResourceStream(storedProcedureFile);
 
             if (stream == null)
             {
                 throw new ArgumentNullException(nameof(stream), $"{storedProcedureFile} was not found");
             }
 
-            using MemoryStream memoryStream = new ();
-            const int bufferSize = 81920; // default
-            await stream.CopyToAsync(memoryStream, bufferSize, cancellationToken);
+            using StreamReader streamReader = new (stream);
 
             StoredProcedureProperties sp = new ()
             {
-                Body = Encoding.UTF8.GetString(memoryStream.ToArray()),
-                Id = Path.GetFileNameWithoutExtension(storedProcedureFile)?
+                Body = await streamReader.ReadToEndAsync(),
+                Id = Path.GetFileNameWithoutExtension(storedProcedureFile)
                     .Split(new[] { '.' }, StringSplitOptions.RemoveEmptyEntries)
                     .Last()
             };
@@ -345,8 +343,6 @@ public sealed class CosmosDbStorage : JobStorage
                     await Container.Scripts.ReplaceStoredProcedureAsync(sp, cancellationToken: cancellationToken);
                 }
             }
-
-            stream.Close();
         }
     }
 }

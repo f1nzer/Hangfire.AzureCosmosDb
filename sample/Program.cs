@@ -35,9 +35,9 @@ string collection = "hangfire-test";
 builder.Services.AddHangfire(o =>
 {
 	o.UseAzureCosmosDbStorage(url, secretKey, database, collection, cosmoClientOptions);
+    // o.UseAzureCosmosDbStorage(new CosmosClient(url, secretKey, cosmoClientOptions), database, collection);
 	o.UseColouredConsoleLogProvider(LogLevel.Trace);
 });
-JobStorage.Current = CosmosDbStorage.Create(url, secretKey, database, collection, cosmoClientOptions);
 
 WebApplication app = builder.Build();
 app.UseStaticFiles();
