@@ -112,13 +112,9 @@ internal static class ClientHelper
 				timeSpan = ex.RetryAfter;
 				logger.Error($"{ex.Message} Status - 429 TooManyRequests");
 			}
-			catch (AggregateException ex) when (ex.InnerException is CosmosException de && (int)de.StatusCode == 429)
-			{
-				timeSpan = de.RetryAfter;
-				logger.Error($"{ex.Message} Status - 429 TooManyRequests");
-			}
 			catch (Exception ex)
 			{
+                // TODO: correctly store exception and rethrow at the end
 				exception = ex;
 				retry += 1;
 				complete = false;

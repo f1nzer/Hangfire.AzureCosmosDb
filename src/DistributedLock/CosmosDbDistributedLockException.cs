@@ -1,6 +1,6 @@
 ﻿using System;
 
-namespace Hangfire.Azure;
+namespace Hangfire.Azure.DistributedLock;
 
 /// <summary>
 ///     Represents errors that occur while acquiring a distributed lock.

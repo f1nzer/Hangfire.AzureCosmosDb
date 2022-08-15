@@ -150,10 +150,6 @@ internal sealed class CosmosDbMonitoringApi : IMonitoringApi
 		{
 			/* ignored */
 		}
-		catch (AggregateException ex) when (ex.InnerException is CosmosException { StatusCode: HttpStatusCode.NotFound })
-		{
-			/* ignored */
-		}
 
 		return null;
 	}

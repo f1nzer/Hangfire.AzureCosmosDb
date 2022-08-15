@@ -68,10 +68,6 @@ internal class FetchedJob : IFetchedJob
 			{
 				logger.Trace($"Unable to remove the job [{JobId}] from the queue [{Queue}]. Status - 404 Not Found");
 			}
-			catch (AggregateException ex) when (ex.InnerException is CosmosException { StatusCode: HttpStatusCode.NotFound })
-			{
-				logger.Trace($"Unable to remove the job [{JobId}] from the queue [{Queue}]. Status - 404 Not Found");
-			}
 			finally
 			{
 				removedFromQueue = true;
@@ -97,10 +93,6 @@ internal class FetchedJob : IFetchedJob
 				data = storage.Container.PatchItemWithRetries<Documents.Queue>(Id, partitionKey, patchOperations, patchItemRequestOptions);
 			}
 			catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
-			{
-				logger.Trace($"Unable to requeue the job [{JobId}] from the queue [{Queue}]. Status - 404 Not Found");
-			}
-			catch (AggregateException ex) when (ex.InnerException is CosmosException { StatusCode: HttpStatusCode.NotFound })
 			{
 				logger.Trace($"Unable to requeue the job [{JobId}] from the queue [{Queue}]. Status - 404 Not Found");
 			}
@@ -137,12 +129,12 @@ internal class FetchedJob : IFetchedJob
 
 				logger.Trace($"Keep-alive query for job: [{temp.Id}] sent");
 			}
-			catch (Exception ex) when (ex is CosmosException { StatusCode: HttpStatusCode.NotFound } or AggregateException { InnerException: CosmosException { StatusCode: HttpStatusCode.NotFound } })
-			{
+			catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+            {
 				logger.Trace($"Job [{temp.Id}] keep-alive query failed. Most likely the job was removed from the queue");
 			}
-			catch (Exception ex) when (ex is CosmosException { StatusCode: HttpStatusCode.BadRequest } or AggregateException { InnerException: CosmosException { StatusCode: HttpStatusCode.BadRequest } })
-			{
+			catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.BadRequest)
+            {
 				logger.Trace($"Job [{temp.Id}] keep-alive query failed. Most likely the job was updated by some other server");
 			}
 			catch (Exception ex)

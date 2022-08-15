@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Threading;
+using Hangfire.Azure.DistributedLock;
 using Hangfire.Azure.Documents;
 using Hangfire.Azure.Documents.Helper;
 using Hangfire.Azure.Helper;
@@ -17,22 +18,23 @@ namespace Hangfire.Azure;
 
 internal sealed class CosmosDbConnection : JobStorageConnection
 {
-	public CosmosDbConnection(CosmosDbStorage storage)
+    private readonly DistributedLockExecutor distributedLockExecutor;
+
+    public CosmosDbConnection(CosmosDbStorage storage)
 	{
 		Storage = storage ?? throw new ArgumentNullException(nameof(storage));
 		QueueProviders = storage.QueueProviders;
-	}
+
+        distributedLockExecutor = new DistributedLockExecutor(storage);
+    }
 
 	public CosmosDbStorage Storage { get; }
 	public PersistentJobQueueProviderCollection QueueProviders { get; }
 
-	public override IDisposable AcquireDistributedLock(string resource, TimeSpan timeout)
-	{
-		if (string.IsNullOrWhiteSpace(resource)) throw new ArgumentNullException(nameof(resource));
-		return new CosmosDbDistributedLock(resource, timeout, Storage);
-	}
+    public override IDisposable AcquireDistributedLock(string resource, TimeSpan timeout) =>
+        distributedLockExecutor.AcquireLock(resource, timeout);
 
-	public override IWriteOnlyTransaction CreateWriteTransaction() => new CosmosDbWriteOnlyTransaction(this);
+    public override IWriteOnlyTransaction CreateWriteTransaction() => new CosmosDbWriteOnlyTransaction(this);
 
 	#region Job
 
@@ -111,10 +113,6 @@ internal sealed class CosmosDbConnection : JobStorageConnection
 		{
 			/* ignored */
 		}
-		catch (AggregateException ex) when (ex.InnerException is CosmosException { StatusCode: HttpStatusCode.NotFound })
-		{
-			/* ignored */
-		}
 
 		return null;
 	}
@@ -137,10 +135,6 @@ internal sealed class CosmosDbConnection : JobStorageConnection
 			};
 		}
 		catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
-		{
-			/* ignored */
-		}
-		catch (AggregateException ex) when (ex.InnerException is CosmosException { StatusCode: HttpStatusCode.NotFound })
 		{
 			/* ignored */
 		}
@@ -167,10 +161,6 @@ internal sealed class CosmosDbConnection : JobStorageConnection
 		{
 			/* ignored */
 		}
-		catch (AggregateException ex) when (ex.InnerException is CosmosException { StatusCode: HttpStatusCode.NotFound })
-		{
-			/* ignored */
-		}
 
 		return null;
 	}
@@ -180,44 +170,24 @@ internal sealed class CosmosDbConnection : JobStorageConnection
 		if (string.IsNullOrWhiteSpace(id)) throw new ArgumentNullException(nameof(id));
 		if (string.IsNullOrWhiteSpace(name)) throw new ArgumentNullException(nameof(name));
 
-		int retry = 0;
-		bool complete;
 		string resource = $"locks:job:{id}:update";
-		CosmosDbDistributedLock? distributedLock = null;
+        TimeSpan timeout = Storage.StorageOptions.TransactionalLockTimeout;
+        
+        distributedLockExecutor.Invoke(resource, timeout, () =>
+        {
+            Documents.Job data = Storage.Container.ReadItemWithRetries<Documents.Job>(id, PartitionKeys.Job);
 
-		do
-		{
-			complete = true;
+            int index = Array.FindIndex(data.Parameters, x => x.Name == name);
+            index = index == -1 ? data.Parameters.Length : index;
 
-			try
-			{
-				distributedLock = new CosmosDbDistributedLock(resource, Storage.StorageOptions.TransactionalLockTimeout, Storage);
+            PatchItemRequestOptions patchItemRequestOptions = new() { IfMatchEtag = data.ETag };
+            PatchOperation[] patchOperations =
+            {
+                PatchOperation.Set($"/parameters/{index}", new Parameter { Name = name, Value = value })
+            };
 
-				Documents.Job data = Storage.Container.ReadItemWithRetries<Documents.Job>(id, PartitionKeys.Job);
-
-				int index = Array.FindIndex(data.Parameters, x => x.Name == name);
-				index = index == -1 ? data.Parameters.Length : index;
-
-				PatchItemRequestOptions patchItemRequestOptions = new() { IfMatchEtag = data.ETag };
-				PatchOperation[] patchOperations =
-				{
-					PatchOperation.Set($"/parameters/{index}", new Parameter { Name = name, Value = value })
-				};
-
-				Storage.Container.PatchItemWithRetries<Documents.Job>(id, PartitionKeys.Job, patchOperations, patchItemRequestOptions);
-			}
-			catch (CosmosDbDistributedLockException ex) when (ex.Key == resource)
-			{
-				/* ignore */
-				retry += 1;
-				complete = false;
-			}
-			finally
-			{
-				distributedLock?.Dispose();
-			}
-
-		} while (retry <= 3 && complete == false);
+            Storage.Container.PatchItemWithRetries<Documents.Job>(id, PartitionKeys.Job, patchOperations, patchItemRequestOptions);
+        });
 	}
 
 	#endregion
@@ -346,10 +316,6 @@ internal sealed class CosmosDbConnection : JobStorageConnection
 		{
 			/* ignored */
 		}
-		catch (AggregateException ex) when (ex.InnerException is CosmosException { StatusCode: HttpStatusCode.NotFound })
-		{
-			/* ignored */
-		}
 	}
 
 	public override void RemoveServer(string serverId)
@@ -361,10 +327,6 @@ internal sealed class CosmosDbConnection : JobStorageConnection
 			Storage.Container.DeleteItemWithRetries<Documents.Server>(serverId, PartitionKeys.Server);
 		}
 		catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
-		{
-			/* ignored */
-		}
-		catch (AggregateException ex) when (ex.InnerException is CosmosException { StatusCode: HttpStatusCode.NotFound })
 		{
 			/* ignored */
 		}
@@ -402,84 +364,62 @@ internal sealed class CosmosDbConnection : JobStorageConnection
 		if (string.IsNullOrWhiteSpace(key)) throw new ArgumentNullException(nameof(key));
 		if (keyValuePairs == null) throw new ArgumentNullException(nameof(keyValuePairs));
 
-		int retry = 0;
-		bool complete;
 		string resource = $"locks:set:{key}:hash";
-		CosmosDbDistributedLock? distributedLock = null;
+        TimeSpan timeout = Storage.StorageOptions.TransactionalLockTimeout;
+        
+        distributedLockExecutor.Invoke(resource, timeout, () =>
+        {
+            Data<Hash> data = new();
+            List<Hash> hashes = Storage.Container.GetItemLinqQueryable<Hash>(requestOptions: new QueryRequestOptions { PartitionKey = PartitionKeys.Hash })
+                .Where(h => h.Key == key)
+                .ToQueryResult()
+                .ToList();
 
-		do
-		{
-			// ReSharper disable once RedundantAssignment
-			complete = true;
+            // ReSharper disable once PossibleMultipleEnumeration
+            Hash[] sources = keyValuePairs.Select(k => new Hash
+            {
+                Key = key,
+                Field = k.Key,
+                Value = k.Value
+            }).ToArray();
 
-			try
-			{
-				distributedLock = new CosmosDbDistributedLock(resource, Storage.StorageOptions.TransactionalLockTimeout, Storage);
+            foreach (Hash source in sources)
+            {
+                int count = hashes.Count(x => x.Field == source.Field);
 
-				Data<Hash> data = new();
-				List<Hash> hashes = Storage.Container.GetItemLinqQueryable<Hash>(requestOptions: new QueryRequestOptions { PartitionKey = PartitionKeys.Hash })
-					.Where(h => h.Key == key)
-					.ToQueryResult()
-					.ToList();
+                switch (count)
+                {
+                    // if for some reason we find more than 1 document for the same field
+                    // lets remove all the documents except one
+                    case > 1:
+                        {
+                            Hash hash = hashes.First(x => x.Field == source.Field);
+                            hash.Value = source.Value;
+                            data.Items.Add(hash);
 
-				// ReSharper disable once PossibleMultipleEnumeration
-				Hash[] sources = keyValuePairs.Select(k => new Hash
-				{
-					Key = key,
-					Field = k.Key,
-					Value = k.Value
-				}).ToArray();
+                            string query = $"SELECT * FROM doc WHERE doc.key = '{hash.Key}' AND doc.field = '{hash.Field}' AND doc.id != '{hash.Id}'";
+                            Storage.Container.ExecuteDeleteDocuments(query, PartitionKeys.Hash);
+                            break;
+                        }
+                    case 1:
+                        {
+                            Hash hash = hashes.Single(x => x.Field == source.Field);
+                            if (string.Equals(hash.Value, source.Value, StringComparison.InvariantCultureIgnoreCase) == false)
+                            {
+                                hash.Value = source.Value;
+                                data.Items.Add(hash);
+                            }
+                            break;
+                        }
+                    case 0:
+                        data.Items.Add(source);
+                        break;
+                }
+            }
 
-				foreach (Hash source in sources)
-				{
-					int count = hashes.Count(x => x.Field == source.Field);
-
-					switch (count)
-					{
-						// if for some reason we find more than 1 document for the same field
-						// lets remove all the documents except one
-						case > 1:
-						{
-							Hash hash = hashes.First(x => x.Field == source.Field);
-							hash.Value = source.Value;
-							data.Items.Add(hash);
-
-							string query = $"SELECT * FROM doc WHERE doc.key = '{hash.Key}' AND doc.field = '{hash.Field}' AND doc.id != '{hash.Id}'";
-							Storage.Container.ExecuteDeleteDocuments(query, PartitionKeys.Hash);
-							break;
-						}
-						case 1:
-						{
-							Hash hash = hashes.Single(x => x.Field == source.Field);
-							if (string.Equals(hash.Value, source.Value, StringComparison.InvariantCultureIgnoreCase) == false)
-							{
-								hash.Value = source.Value;
-								data.Items.Add(hash);
-							}
-							break;
-						}
-						case 0:
-							data.Items.Add(source);
-							break;
-					}
-				}
-
-				Storage.Container.ExecuteUpsertDocuments(data, PartitionKeys.Hash);
-				break;
-			}
-			catch (CosmosDbDistributedLockException exception) when (exception.Key == resource)
-			{
-				/* ignore */
-				retry += 1;
-				complete = false;
-			}
-			finally
-			{
-				distributedLock?.Dispose();
-			}
-
-		} while (retry <= 3 && complete == false);
-	}
+            Storage.Container.ExecuteUpsertDocuments(data, PartitionKeys.Hash);
+        });
+    }
 
 	public override long GetHashCount(string key)
 	{

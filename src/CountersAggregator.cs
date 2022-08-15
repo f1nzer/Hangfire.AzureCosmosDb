@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Threading;
+using Hangfire.Azure.DistributedLock;
 using Hangfire.Azure.Documents;
 using Hangfire.Azure.Documents.Helper;
 using Hangfire.Azure.Helper;
@@ -19,23 +20,23 @@ internal class CountersAggregator : IServerComponent
 	private readonly ILog logger = LogProvider.For<CountersAggregator>();
 	private readonly PartitionKey partitionKey = new((int)DocumentTypes.Counter);
 	private readonly CosmosDbStorage storage;
+    private readonly DistributedLockExecutor distributedLockExecutor;
 
-	public CountersAggregator(CosmosDbStorage storage)
+    public CountersAggregator(CosmosDbStorage storage)
 	{
 		this.storage = storage ?? throw new ArgumentNullException(nameof(storage));
+        distributedLockExecutor = new DistributedLockExecutor(storage);
 	}
 
 	public void Execute(CancellationToken cancellationToken)
-	{
-		CosmosDbDistributedLock? distributedLock = null;
+    {
+        TimeSpan timeout = storage.StorageOptions.CountersAggregateInterval;
 
-		try
-		{
+        bool lockAcquired = distributedLockExecutor.TryInvoke(DISTRIBUTED_LOCK_KEY, timeout, () =>
+        {
+
 			// check if the token was cancelled
 			cancellationToken.ThrowIfCancellationRequested();
-
-			// get the distributed lock
-			distributedLock = new CosmosDbDistributedLock(DISTRIBUTED_LOCK_KEY, storage.StorageOptions.CountersAggregateInterval, storage);
 
 			logger.Trace("Aggregating records in [Counter] table.");
 
@@ -96,7 +97,7 @@ internal class CountersAggregator : IServerComponent
 							PatchItemRequestOptions patchItemRequestOptions = new() { IfMatchEtag = aggregated.ETag };
 							storage.Container.PatchItemWithRetries<Counter>(aggregated.Id, partitionKey, patchOperations, patchItemRequestOptions);
 						}
-						catch (Exception ex) when (ex is CosmosException { StatusCode: HttpStatusCode.NotFound } or AggregateException { InnerException: CosmosException { StatusCode: HttpStatusCode.NotFound } })
+						catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
 						{
 							logger.Trace($"Aggregated document [{key}] was not found. Creating a new document");
 
@@ -123,19 +124,16 @@ internal class CountersAggregator : IServerComponent
 
 				logger.Trace($"Total [{completed}] records from the [Counter] table were aggregated.");
 			}
-		}
-		catch (CosmosDbDistributedLockException exception) when (exception.Key == DISTRIBUTED_LOCK_KEY)
-		{
-			logger.Debug($@"An exception was thrown during acquiring distributed lock on the [{DISTRIBUTED_LOCK_KEY}] resource within [{storage.StorageOptions.CountersAggregateInterval.TotalSeconds}] seconds. " +
-			             $@"Counter records were not aggregated. It will be retried in [{storage.StorageOptions.CountersAggregateInterval.TotalSeconds}] seconds.");
-		}
-		finally
-		{
-			distributedLock?.Dispose();
-		}
+        });
+        
+        if (!lockAcquired)
+        {
+            logger.Debug($@"An exception was thrown during acquiring distributed lock on the [{DISTRIBUTED_LOCK_KEY}] resource within [{timeout.TotalSeconds}] seconds. " +
+                         $@"Counter records were not aggregated. It will be retried in [{timeout.TotalSeconds}] seconds.");
+        }
 
 		// wait for the interval specified
-		cancellationToken.WaitHandle.WaitOne(storage.StorageOptions.CountersAggregateInterval);
+		cancellationToken.WaitHandle.WaitOne(timeout);
 	}
 
 	public override string ToString() => GetType().ToString();
