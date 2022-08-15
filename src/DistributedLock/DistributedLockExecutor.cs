@@ -14,10 +14,8 @@ internal class DistributedLockExecutor
     private readonly CosmosDbStorage storage;
     private readonly ILog logger = LogProvider.For<DistributedLockExecutor>();
 
-    public DistributedLockExecutor(CosmosDbStorage storage)
-    {
+    public DistributedLockExecutor(CosmosDbStorage storage) =>
         this.storage = storage ?? throw new ArgumentNullException(nameof(storage));
-    }
 
     public bool TryInvoke(string resourceKey, TimeSpan timeout, Action action)
     {
@@ -47,76 +45,62 @@ internal class DistributedLockExecutor
             throw new ArgumentNullException(nameof(resourceKey));
         }
 
-        int attempt = 1;
-        while (true)
+        Stopwatch lockAcquiringStopwatch  = Stopwatch.StartNew();
+        bool tryAcquireLock = true;
+        
+        while (tryAcquireLock)
         {
             try
             {
-                return AcquireOnce(resourceKey, timeout);
+                DistributedLockHandle lockHandle = AcquireOnce(resourceKey, timeout);
+                logger.Trace($"Acquired lock [{resourceKey}] in [{lockAcquiringStopwatch.Elapsed.TotalMilliseconds:#.##}] ms.");
+                return lockHandle;
             }
-            catch (CosmosDbDistributedLockException ex) when (ex.Key == resourceKey)
+            catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.Conflict)
             {
-                if (attempt < 3)
+                logger.Trace($"Unable to create a lock [{resourceKey}]. Status - 409 Conflict. Lock already exists");
+            }
+            
+            if (lockAcquiringStopwatch.ElapsedMilliseconds > timeout.TotalMilliseconds)
+            {
+                tryAcquireLock = false;
+            }
+            else
+            {
+                int msLeft = (int) (timeout.TotalMilliseconds - lockAcquiringStopwatch.ElapsedMilliseconds);
+                int sleepDuration = Math.Min(msLeft, 1_000);
+
+                if (sleepDuration > 0)
                 {
-                    attempt++;
-                    continue;
+                    Thread.Sleep(sleepDuration);
                 }
-                
-                throw;
-            }   
+                else
+                {
+                    tryAcquireLock = false;
+                }
+            }
         }
+        
+        throw new CosmosDbDistributedLockException(
+            $"Could not place a lock [{resourceKey}]: Lock timeout reached [{timeout.TotalSeconds}] seconds.", resourceKey);
     }
     
     private DistributedLockHandle AcquireOnce(string resourceKey, TimeSpan timeout)
     {
-        logger.Trace($"Trying to acquire lock [{resourceKey}] within [{timeout.TotalSeconds}] seconds");
-
-		Stopwatch acquireStart = new();
-		acquireStart.Start();
+        logger.Trace($"Trying to acquire lock [{resourceKey}]");
 
 		// ttl for lock document
 		// this is if the expiration manager was not able to remove the orphan lock in time.
         int ttl = (int) Math.Max(60, timeout.TotalSeconds * 1.5);
 
-        Lock? @lock = null;
-		do
-		{
-			Lock data = new()
-			{
-				Id = resourceKey,
-				LastHeartBeat = DateTime.UtcNow,
-				TimeToLive = ttl
-			};
-
-			try
-			{
-				@lock = storage.Container.CreateItemWithRetries(data, PartitionKeys.Lock);
-				break;
-			}
-			catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.Conflict)
-			{
-				logger.Trace($"Unable to create a lock [{resourceKey}]. Status - 409 Conflict. Lock already exists");
-			}
-			catch (Exception ex)
-			{
-				logger.ErrorException($"Unable to create a lock [{resourceKey}]", ex);
-			}
-            
-            // TODO: count elapsed time on top level
-
-			// check the timeout
-			if (acquireStart.ElapsedMilliseconds > timeout.TotalMilliseconds)
-            {
-                throw new CosmosDbDistributedLockException(
-                    $"Could not place a lock [{resourceKey}]: Lock timeout reached [{timeout.TotalSeconds}] seconds.", resourceKey);
-            }
-
-			logger.Trace($"Unable to acquire lock [{resourceKey}]. Will try after [2] seconds");
-			Thread.Sleep(2000);
-
-		} while (@lock == null);
-
-		logger.Trace($"Acquired lock [{resourceKey}] for [{timeout.TotalSeconds}] seconds; in [{acquireStart.Elapsed.TotalMilliseconds:#.##}] ms.");
-        return new DistributedLockHandle(@lock, storage.Container);
+        Lock data = new()
+        {
+            Id = resourceKey,
+            LastHeartBeat = DateTime.UtcNow,
+            TimeToLive = ttl
+        };
+        
+        Lock lockObj = storage.Container.CreateItemWithRetries(data, PartitionKeys.Lock);
+        return new DistributedLockHandle(lockObj, storage.Container);
     }
 }
